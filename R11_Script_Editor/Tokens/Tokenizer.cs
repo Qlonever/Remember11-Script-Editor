@@ -28,6 +28,12 @@ namespace R11_Script_Editor.Tokens
         static byte[] data;
         static byte[] data_switch_block;
         static public List<Token> Tokens;
+        static public List<string[]> labels_jumped_to;
+        // Since MsgDisp2 and SelectDisp2 choices have IDs, they can be used for matching text between languages
+        // Allows for multiple instances of same ID, mismatches can theoretically happen
+        static public Dictionary<UInt16, List<string>> MsgDisp2Jp;
+        static public Dictionary<UInt16, List<string>> SelectDisp2Jp;
+        static public List<string> SystemMsgJp;
         static string filename;
         static bool _changed_file;
         static public bool ChangedFile
@@ -3156,25 +3162,23 @@ namespace R11_Script_Editor.Tokens
             {0x51d3, "BGM33ADX"},
         };
 
-
-        static public void OpenFile(string fileName, string fileNameJp)
+        // In order to support language comparisons for files with major script edits, equivalent script files must be fully parsed for each language
+        static public void ParseFile(string fileName, bool jpText = false)
         {
-            ChangedFile = false;
-            Tokens = new List<Token>();
-            List<string[]> labels_jumped_to = new List<string[]>();
+            // Manually track count of each MessageId/ChoiceId/SystemMessage for main file
+            var MsgDisp2Instances = new Dictionary<UInt16, UInt16>();
+            var SelectDisp2Instances = new Dictionary<UInt16, UInt16>();
+            var SystemMsgInstances = 0;
+            if (!jpText)
+            {
+                Tokens = new List<Token>();
+                labels_jumped_to = new List<string[]>();
+            }
             pos = 0;
             posEndOfInstruction = -1;
             posStringBlock = -1;
             filename = fileName;
-
-            byte[] data_jp, data_en;
-            data_en = File.ReadAllBytes(fileName);
-            data = data_en;
-
-            if (fileNameJp != null)
-                data_jp = File.ReadAllBytes(fileNameJp);
-            else
-                data_jp = null;
+            data = File.ReadAllBytes(fileName);
 
             while (posEndOfInstruction == -1 || pos < posEndOfInstruction)
             {
@@ -3183,34 +3187,77 @@ namespace R11_Script_Editor.Tokens
                     throw new Exception("No implimentation of token " + ((TokenType)data[pos]).ToString() + " at position " + pos.ToString());
 
                 token.Offset = (UInt16)pos;
-                Tokens.Add(token);
+                if (!jpText)
+                    Tokens.Add(token);
 
-                // This is a dirty hack. Basically I'm swapping out the static data with the appropriate language. I was expecting to have to handle multiple languages. Forgive me.
-                if (data_jp != null)
+                // If jpText == true, populate collections with japanese texts
+                // Otherwise, add japanese texts from those collections to main file tokens
+
+                if (token is TokenMsgDisp2)
                 {
-                    if (token is TokenMsgDisp2)
+                    if (jpText)
                     {
-                        data = data_jp;
-                        var token2 = (TokenMsgDisp2) ReadNextToken();
-                        (token as TokenMsgDisp2).MessageJp = token2.Message;
-                        data = data_en;
+                        var msgId = (token as TokenMsgDisp2).MsgId;
+                        if (!MsgDisp2Jp.ContainsKey(msgId))
+                            MsgDisp2Jp[msgId] = new List<string>();
+
+                        MsgDisp2Jp[msgId].Add((token as TokenMsgDisp2).Message);
                     }
-                    else if (token is TokenSelectDisp2)
+                    else
                     {
-                        data = data_jp;
-                        var token2 = (TokenSelectDisp2) ReadNextToken();
-                        for (int i=0; i<token2.Entries.Count; i++)
+                        var msgId = (token as TokenMsgDisp2).MsgId;
+                        if (!MsgDisp2Instances.ContainsKey(msgId))
+                            MsgDisp2Instances.Add(msgId, 0);
+
+                        if (MsgDisp2Jp.ContainsKey(msgId))
                         {
-                            (token as TokenSelectDisp2).Entries[i].MessageJp = token2.Entries[i].Message;
+                            if (MsgDisp2Instances[msgId] < MsgDisp2Jp[msgId].Count)
+                                (token as TokenMsgDisp2).MessageJp = MsgDisp2Jp[msgId][MsgDisp2Instances[msgId]];
                         }
-                        data = data_en;
+
+                        MsgDisp2Instances[msgId]++;
                     }
-                    else if (token is TokenSystemMsg)
+                }
+                else if (token is TokenSelectDisp2)
+                {
+                    if (jpText)
                     {
-                        data = data_jp;
-                        var token2 = (TokenSystemMsg)ReadNextToken();
-                        (token as TokenSystemMsg).MessageJp = token2.Message;
-                        data = data_en;
+                        for (int i = 0; i < (token as TokenSelectDisp2).Entries.Count; i++)
+                        {
+                            var choiceId = (token as TokenSelectDisp2).Entries[i].ChoiceId;
+                            if (!SelectDisp2Jp.ContainsKey(choiceId))
+                                SelectDisp2Jp[choiceId] = new List<string>();
+                            SelectDisp2Jp[choiceId].Add((token as TokenSelectDisp2).Entries[i].Message);
+                        }
+                    }
+                    else
+                    {
+                        for (int i = 0; i < (token as TokenSelectDisp2).Entries.Count; i++)
+                        {
+                            var choiceId = (token as TokenSelectDisp2).Entries[i].ChoiceId;
+                            if (!SelectDisp2Instances.ContainsKey(choiceId))
+                                SelectDisp2Instances.Add(choiceId, 0);
+
+                            if (SelectDisp2Jp.ContainsKey(choiceId))
+                            {
+                                if (SelectDisp2Instances[choiceId] < SelectDisp2Jp[choiceId].Count)
+                                    (token as TokenSelectDisp2).Entries[i].MessageJp = SelectDisp2Jp[choiceId][SelectDisp2Instances[choiceId]];
+                            }
+
+                            SelectDisp2Instances[choiceId]++;
+                        }
+                    }
+                }
+                else if (token is TokenSystemMsg)
+                {
+                    if (jpText)
+                        SystemMsgJp.Add((token as TokenSystemMsg).Message);
+                    else
+                    {
+                        if (SystemMsgInstances < SystemMsgJp.Count)
+                            (token as TokenSystemMsg).MessageJp = SystemMsgJp[SystemMsgInstances];
+
+                        SystemMsgInstances++;
                     }
                 }
 
@@ -3222,23 +3269,40 @@ namespace R11_Script_Editor.Tokens
                     posEndOfInstruction = pos;
                     break;
                 }
-                else if (posStringBlock < 0) {
+                else if (posStringBlock < 0)
+                {
                     if (token is TokenMsgDisp2)
                         posStringBlock = (token as TokenMsgDisp2).MsgPtr;
                 }
 
-                // Hold onto a list of these jumps so we can create a label for them
-                if (token is TokenIf)
+                if (!jpText)
                 {
-                    labels_jumped_to.Add(new string[] { (token as TokenIf).LabelJump, token.Offset.ToString() });
+                    // Hold onto a list of these jumps so we can create a label for them
+                    if (token is TokenIf)
+                    {
+                        labels_jumped_to.Add(new string[] { (token as TokenIf).LabelJump, token.Offset.ToString() });
+                    }
+                    else if (token is TokenInternalGoto)
+                    {
+                        labels_jumped_to.Add(new string[] { (token as TokenInternalGoto).LabelJump, token.Offset.ToString() });
+                    }
+                    else if (token is TokenSelectDisp)
+                        throw new NotImplementedException(); //@TODO: HANDLE THIS JUMP (Only used in DBG)
                 }
-                else if (token is TokenInternalGoto)
-                {
-                    labels_jumped_to.Add(new string[] { (token as TokenInternalGoto).LabelJump, token.Offset.ToString() });
-                }
-                else if (token is TokenSelectDisp)
-                    throw new NotImplementedException(); //@TODO: HANDLE THIS JUMP (Only used in DBG)
             }
+        }
+
+        static public void OpenFile(string fileName, string fileNameJp)
+        {
+            ChangedFile = false;
+            MsgDisp2Jp = new Dictionary<UInt16, List<string>>();
+            SelectDisp2Jp = new Dictionary<UInt16, List<string>>();
+            SystemMsgJp = new List<string>();
+
+            if (fileNameJp != null)
+                ParseFile(fileNameJp, true);
+
+            ParseFile(fileName);
 
             // Create labels for jumping points, then update the tokens at those offsets
             foreach (var t in Tokens)
@@ -3266,6 +3330,8 @@ namespace R11_Script_Editor.Tokens
                 {
                     var t1 = (TokenMsgDisp2)token1;
                     string msg = t1.MessageJp;
+                    if (String.IsNullOrEmpty(msg))
+                        continue;
 
                     for (int j = i+1; j < Tokens.Count; j++)
                     {
@@ -3312,6 +3378,9 @@ namespace R11_Script_Editor.Tokens
                         {
                             var t2 = (TokenMsgDisp2)token2;
                             foreach (var e in t1.Entries)
+                            {
+                                if (String.IsNullOrEmpty(e.MessageJp))
+                                    continue;
                                 if (e.MessageJp == t2.MessageJp)
                                 {
                                     t1.Label = t1.Offset.ToString();
@@ -3323,6 +3392,7 @@ namespace R11_Script_Editor.Tokens
                                     t2.Data = "IDENTICAL JP FOUND";
                                     break;
                                 }
+                            }
                         }
                         /*
                         else if (token2 is TokenSelectDisp2)
